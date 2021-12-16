@@ -18,18 +18,10 @@ composer require league/flysystem-rackspace
 ## Usage
 
 ```php
-use OpenCloud\OpenStack;
-use OpenCloud\Rackspace;
 use League\Flysystem\Filesystem;
 use League\Flysystem\Rackspace\RackspaceAdapter as Adapter;
 
-$client = new Rackspace(Rackspace::UK_IDENTITY_ENDPOINT, array(
-    'username' => ':username',
-    'apiKey' => ':password',
-));
-
-$store = $client->objectStoreService('cloudFiles', 'LON');
-$container = $store->getContainer('flysystem');
-
-$filesystem = new Filesystem(new Adapter($container));
+$adapter = new Adapter(':username',':password');
+$adapter->setContainerName('flysystem')->objectStoreService('cloudFiles','LON');
+$filesystem = new Filesystem($adapter);
 ```
