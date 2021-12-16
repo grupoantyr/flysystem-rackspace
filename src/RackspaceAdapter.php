@@ -16,7 +16,8 @@ class RackspaceAdapter extends AbstractAdapter
     use StreamedCopyTrait;
     use NotSupportingVisibilityTrait;
 
-    const US_IDENTITY_ENDPOINT         = 'https://identity.api.rackspacecloud.com/v2.0/';
+    const US_IDENTITY_ENDPOINT = 'https://identity.api.rackspacecloud.com/v2.0/';
+    const UK_IDENTITY_ENDPOINT = 'https://lon.identity.api.rackspacecloud.com/v2.0/';
 
     /**
      * @var string # Token access for the Cloud Files service
@@ -43,7 +44,7 @@ class RackspaceAdapter extends AbstractAdapter
      */
     protected $serviceCatalogs = null;
 
-    public function __construct($username, $apiKey)
+    public function __construct($username, $apiKey, $IDENTITY_ENDPOINT)
     {
         $headers = ['Content-Type' => 'application/json'];
         $body = json_encode([
@@ -55,7 +56,7 @@ class RackspaceAdapter extends AbstractAdapter
             ]
         ]);
 
-        $response = $this->request('POST',self::US_IDENTITY_ENDPOINT.'tokens',$headers,$body);
+        $response = $this->request('POST',$IDENTITY_ENDPOINT.'tokens',$headers,$body);
 
         if (is_object($response)){
             $responseBody = json_decode($response->getBody());
