@@ -110,10 +110,10 @@ class RackspaceAdapter extends AbstractAdapter
         $headers['Content-Type'] = mime_content_type($contents);
         $body    = $contents;
         $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
-        $response = $this->request('PUT', $this->ENDPOINT.'/'.$pathPrefix, $headers, $body);
+        $response = $this->request('PUT', $this->ENDPOINT.'/'.$pathPrefix.'?'.'format=json', $headers, $body);
 
         if (is_object($response)){
-            return $this->normalizeObject($response->getHeaders(), $pathPrefix);
+            return $this->normalizeObject($this->headersNormalizeObject($response->getHeaders()), $pathPrefix);
         }else{
             return false;
         }
@@ -228,7 +228,24 @@ class RackspaceAdapter extends AbstractAdapter
 
     public function listContents($directory = '', $recursive = false)
     {
-        // TODO: Implement listContents() method.
+        $response = [];
+        $marker = null;
+        $location = $this->applyPathPrefix($this->containerName.'/'.$directory);
+        $headers['X-Auth-Token'] = $this->TOKEN;
+        $request_response = $this->request('GET', $this->ENDPOINT.'/'.$location.'?'.'format=json', $headers);
+
+        $objectsList = json_decode($request_response->getBody()->getContents(), true);
+
+        if (count($objectsList) > 0){
+            $objects = [];
+            foreach ($objectsList AS $object){
+                array_push($objects, $this->normalizeObject($object, $location));
+            }
+            $response = array_merge($response, $objects);
+        }
+
+        return Util::emulateDirectories($response);
+
     }
 
     public function getMetadata($path)
@@ -336,19 +353,34 @@ class RackspaceAdapter extends AbstractAdapter
         }
     }
 
-    protected function normalizeObject($object ,$path)
+    protected function objectList(array $params = array())
+    {
+        $params['format'] = 'json';
+
+    }
+
+    protected function headersNormalizeObject(array $object)
+    {
+        return [
+            'content_type'    => $object['Content-Type'][0],
+            'last_modified'   => $object['Last-Modified'][0],
+            'bytes'  => $object['Content-Length'][0]
+        ];
+    }
+
+    protected function normalizeObject(array $object ,$path)
     {
         $name = $path;
         $name = $this->removePathPrefix($name);
-        $mimetype = explode('; ', $object['Content-Type'][0]);
+        $mimetype = explode('; ', $object['content_type']);
 
         return [
             'type'      => ((in_array('application/directory', $mimetype )) ? 'dir' : 'file'),
             'dirname'   => Util::dirname($name),
             'path'      => $path,
-            'timestamp' => strtotime($object['Last-Modified'][0]),
+            'timestamp' => strtotime($object['last_modified']),
             'mimetype'  => reset($mimetype),
-            'size'      => $object['Content-Length'][0],
+            'size'      => $object['bytes'],
         ];
     }
 
