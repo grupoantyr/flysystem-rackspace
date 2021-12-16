@@ -103,11 +103,13 @@ class RackspaceAdapter extends AbstractAdapter
     public function write($path, $contents, Config $config)
     {
         $headers = [];
+        $headers['X-Auth-Token'] = $this->TOKEN;
+        if ( $contents !== ''){
+            $headers['Content-Type'] = mime_content_type($contents);
+        }
         if ($config && $config->has('headers')) {
             $headers =  $config->get('headers');
         }
-        $headers['X-Auth-Token'] = $this->TOKEN;
-        $headers['Content-Type'] = mime_content_type($contents);
         $body    = $contents;
         $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
         $response = $this->request('PUT', $this->ENDPOINT.'/'.$pathPrefix.'?'.'format=json', $headers, $body);
@@ -136,7 +138,7 @@ class RackspaceAdapter extends AbstractAdapter
         $response = $this->request('PUT',$this->ENDPOINT.'/'.$pathPrefix, $headers, $body);
 
         if (is_object($response)){
-            return $this->normalizeObject($response->getHeaders(), $pathPrefix);
+            return $this->normalizeObject($this->headersNormalizeObject($response->getHeaders()), $pathPrefix);
         }else{
             return false;
         }
@@ -235,7 +237,6 @@ class RackspaceAdapter extends AbstractAdapter
         $request_response = $this->request('GET', $this->ENDPOINT.'/'.$location.'?'.'format=json', $headers);
 
         $objectsList = json_decode($request_response->getBody()->getContents(), true);
-
         if (count($objectsList) > 0){
             $objects = [];
             foreach ($objectsList AS $object){
@@ -256,9 +257,7 @@ class RackspaceAdapter extends AbstractAdapter
 
         $response = $this->request('GET',$this->ENDPOINT.'/'.$pathPrefix, $headers);
 
-        $object = $response->getHeaders();
-
-        return $this->normalizeObject($object, $pathPrefix);
+        return $this->normalizeObject($this->headersNormalizeObject($response->getHeaders()), $pathPrefix);
     }
 
     public function getSize($path)
@@ -370,7 +369,12 @@ class RackspaceAdapter extends AbstractAdapter
 
     protected function normalizeObject(array $object ,$path)
     {
-        $name = $path;
+        if (isset($object['name'])){
+            $name = $object['name'];
+            $path = $path.$this->applyPathPrefix($name);
+        }else{
+            $name = $path;
+        }
         $name = $this->removePathPrefix($name);
         $mimetype = explode('; ', $object['content_type']);
 
