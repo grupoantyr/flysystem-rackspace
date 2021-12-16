@@ -5,3 +5,4 @@ coverage
 coverage.xml
 tests/files
 .idea/
+index.php
