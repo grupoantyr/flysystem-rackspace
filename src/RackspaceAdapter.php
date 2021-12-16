@@ -2,181 +2,198 @@
 
 namespace League\Flysystem\Rackspace;
 
-use Guzzle\Http\Exception\BadResponseException;
-use Guzzle\Http\Exception\ClientErrorResponseException;
+use GuzzleHttp\Exception\ClientException;
 use League\Flysystem\Adapter\AbstractAdapter;
 use League\Flysystem\Adapter\Polyfill\NotSupportingVisibilityTrait;
 use League\Flysystem\Adapter\Polyfill\StreamedCopyTrait;
 use League\Flysystem\Config;
+use League\Flysystem\FileNotFoundException;
 use League\Flysystem\Util;
-use OpenCloud\ObjectStore\Resource\Container;
-use OpenCloud\ObjectStore\Resource\DataObject;
+use GuzzleHttp\Client;
 
 class RackspaceAdapter extends AbstractAdapter
 {
     use StreamedCopyTrait;
     use NotSupportingVisibilityTrait;
 
-    /**
-     * @var Container
-     */
-    protected $container;
+    const US_IDENTITY_ENDPOINT         = 'https://identity.api.rackspacecloud.com/v2.0/';
 
     /**
-     * @var string
+     * @var string # Token access for the Cloud Files service
      */
-    protected $prefix;
+    protected $TOKEN = null;
 
     /**
-     * Constructor.
-     *
-     * @param Container $container
-     * @param string    $prefix
+     * @var string # ENDPOINT for the Cloud Files service
      */
-    public function __construct(Container $container, $prefix = null)
+    protected $ENDPOINT = null;
+
+    /**
+     * @var string # CDN_ENDPOINT also from the cloud files service
+     */
+    protected $CDN_ENDPOINT = null;
+
+    /**
+     * @var string # To upload objects into a container
+     */
+    protected $containerName = null;
+
+    /**
+     * @var string # serviceCatalog of client
+     */
+    protected $serviceCatalogs = null;
+
+    public function __construct($username, $apiKey)
     {
-        $this->setPathPrefix($prefix);
+        $headers = ['Content-Type' => 'application/json'];
+        $body = json_encode([
+            "auth" => [
+                "RAX-KSKEY:apiKeyCredentials" => [
+                    "username" => $username,
+                    "apiKey"   => $apiKey
+                ]
+            ]
+        ]);
 
-        $this->container = $container;
+        $response = $this->request('POST',self::US_IDENTITY_ENDPOINT.'tokens',$headers,$body);
+
+        if (is_object($response)){
+            $responseBody = json_decode($response->getBody());
+            $this->TOKEN = $responseBody->access->token->id;
+            $this->serviceCatalogs = $responseBody->access->serviceCatalog;
+        }else{
+            throw new \Exception($response);
+        }
     }
 
     /**
-     * Get the container.
-     *
-     * @return Container
+     * @param string $containerName
      */
-    public function getContainer()
+    public function setContainerName($containerName)
     {
-        return $this->container;
+        $this->containerName = $containerName;
+
+        return $this;
     }
 
     /**
-     * Get an object.
-     *
-     * @param string $path
-     *
-     * @return DataObject
+     * @param string $name    The name of the service as it appears in the Catalog
+     * @param string $region  The region (DFW, IAD, ORD, LON, SYD)
      */
-    protected function getObject($path)
+    public function objectStoreService($StoreServiceName, $StoreServiceRegion)
     {
-        $location = $this->applyPathPrefix($path);
-
-        return $this->container->getObject($location);
+        foreach ($this->serviceCatalogs AS $serviceCatalog){
+            if ($serviceCatalog->name == $StoreServiceName){
+                foreach ($serviceCatalog->endpoints AS $endpoint){
+                    if ($endpoint->region == $StoreServiceRegion){
+                        $this->ENDPOINT = $endpoint->publicURL;
+                    }
+                }
+            }elseif ( $serviceCatalog->name == 'cloudFilesCDN' ){
+                foreach ($serviceCatalog->endpoints AS $endpoint){
+                    if ($endpoint->region == $StoreServiceRegion){
+                        $this->CDN_ENDPOINT = $endpoint->publicURL;
+                    }
+                }
+            }
+        }
+        return $this;
     }
 
-    /**
-     * Get the metadata of an object.
-     *
-     * @param string $path
-     *
-     * @return DataObject
-     */
-    protected function getPartialObject($path)
-    {
-        $location = $this->applyPathPrefix($path);
-
-        return $this->container->getPartialObject($location);
-    }
-
-    /**
-     * {@inheritdoc}
-     */
     public function write($path, $contents, Config $config)
     {
-        $location = $this->applyPathPrefix($path);
         $headers = [];
-
         if ($config && $config->has('headers')) {
             $headers =  $config->get('headers');
         }
+        $headers['X-Auth-Token'] = $this->TOKEN;
+        $headers['Content-Type'] = mime_content_type($contents);
+        $body    = $contents;
+        $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
+        $response = $this->request('PUT', $this->ENDPOINT.'/'.$pathPrefix, $headers, $body);
 
-        $response = $this->container->uploadObject($location, $contents, $headers);
-
-        return $this->normalizeObject($response);
+        if (is_object($response)){
+            return $this->normalizeObject($response->getHeaders(), $pathPrefix);
+        }else{
+            return false;
+        }
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function update($path, $contents, Config $config)
     {
-        $object = $this->getObject($path);
-        $object->setContent($contents);
-        $object->setEtag(null);
-        $response = $object->update();
+        $headers = [];
+        if ($config && $config->has('headers')) {
+            $headers =  $config->get('headers');
+        }
+        $headers['X-Auth-Token'] = $this->TOKEN;
+        $headers['Content-Type'] = mime_content_type($contents);
+        $headers['X-Object-Meta-Some-Key'] = 'some-value';
 
-        if (! $response->getLastModified()) {
+        $body    = $contents;
+
+        $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
+
+        $response = $this->request('PUT',$this->ENDPOINT.'/'.$pathPrefix, $headers, $body);
+
+        if (is_object($response)){
+            return $this->normalizeObject($response->getHeaders(), $pathPrefix);
+        }else{
             return false;
         }
-
-        return $this->normalizeObject($response);
     }
 
-    /**
-     * {@inheritdoc}
-     */
+    public function updateStream($path, $resource, Config $config)
+    {
+        return $this->update($path, $resource, $config);
+    }
+
     public function rename($path, $newpath)
     {
-        $object = $this->getObject($path);
-        $newlocation = $this->applyPathPrefix($newpath);
-        $destination = '/'.$this->container->getName().'/'.ltrim($newlocation, '/');
-        $response = $object->copy($destination);
+        $relocation = $this->applyPathPrefix($this->containerName.'/'.$newpath);
+        $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
 
-        if ($response->getStatusCode() !== 201) {
+        $headers = ['X-Auth-Token' => $this->TOKEN, 'Destination' => $relocation];
+
+        $response = $this->request('COPY',$this->ENDPOINT.'/'.$pathPrefix, $headers);
+
+        if (is_object($response) && $response->getStatusCode() !== 201){
             return false;
         }
 
-        $object->delete();
+        $this->delete($path);
 
         return true;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function delete($path)
     {
-        try {
-            $location = $this->applyPathPrefix($path);
+        $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
+        $headers = ['X-Auth-Token' => $this->TOKEN];
 
-            $this->container->deleteObject($location);
-        } catch (BadResponseException $exception) {
+        $response = $this->request('DELETE',$this->ENDPOINT.'/'.$pathPrefix, $headers);
+
+        if (is_object($response)){
+            return true;
+        }else{
             return false;
         }
-
-        return true;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function deleteDir($dirname)
     {
-        $paths = [];
-        $prefix = '/'.$this->container->getName().'/';
-        $location = $this->applyPathPrefix($dirname);
-        $objects = $this->container->objectList(['prefix' => $location]);
+        $response = $this->delete($dirname);
 
-        foreach ($objects as $object) {
-            $paths[] = $prefix.ltrim($object->getName(), '/');
-        }
-
-        $service = $this->container->getService();
-        $response =  $service->bulkDelete($paths);
-
-        if ($response->getStatusCode() === 200) {
+        if ( isset( $response->status ) && $response->status === 200) {
             return true;
         }
 
         return false;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function createDir($dirname, Config $config)
     {
         $headers = $config->get('headers', []);
+        $headers['X-Auth-Token'] = $this->TOKEN;
         $headers['Content-Type'] = 'application/directory';
         $extendedConfig = (new Config())->setFallback($config);
         $extendedConfig->set('headers', $headers);
@@ -184,145 +201,97 @@ class RackspaceAdapter extends AbstractAdapter
         return $this->write($dirname, '', $extendedConfig);
     }
 
-    /**
-     * {@inheritdoc}
-     */
-    public function writeStream($path, $resource, Config $config)
-    {
-        return $this->write($path, $resource, $config);
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function updateStream($path, $resource, Config $config)
-    {
-        return $this->update($path, $resource, $config);
-    }
-
-    /**
-     * {@inheritdoc}
-     */
     public function has($path)
     {
         try {
             $location = $this->applyPathPrefix($path);
-            $exists = $this->container->objectExists($location);
-        } catch (ClientErrorResponseException $e) {
+            $exists = $this->objectExists($location);
+        } catch (\Exception $e) {
             return false;
         }
 
         return $exists;
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function read($path)
     {
-        $object = $this->getObject($path);
-        $data = $this->normalizeObject($object);
-        $data['contents'] = (string) $object->getContent();
-
-        return $data;
+        try {
+            $headers = ['X-Auth-Token' => $this->TOKEN];
+            $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
+            $response = $this->request('GET', $this->ENDPOINT.'/'.$pathPrefix, $headers);
+            $data['contents'] = (string) $response->getBody();
+            return $data;
+        }catch (FileNotFoundException $exception){
+            return false;
+        }
     }
 
-    /**
-     * {@inheritdoc}
-     */
-    public function readStream($path)
-    {
-        $object = $this->getObject($path);
-        $data = $this->normalizeObject($object);
-        $responseBody = $object->getContent();
-        $responseBody->rewind();
-        $data['stream'] = $responseBody->getStream();
-        $responseBody->detachStream();
-
-        return $data;
-    }
-
-    /**
-     * {@inheritdoc}
-     */
     public function listContents($directory = '', $recursive = false)
     {
-        $response = [];
-        $marker = null;
-        $location = $this->applyPathPrefix($directory);
-
-        while(true) {
-            $objectList = $this->container->objectList(['prefix' => $location, 'marker' => $marker]);
-
-            if ($objectList->count() === 0) {
-                break;
-            }
-
-            $response = array_merge($response, iterator_to_array($objectList));
-            $marker = end($response)->getName();
-        }
-
-        return Util::emulateDirectories(array_map([$this, 'normalizeObject'], $response));
+        // TODO: Implement listContents() method.
     }
 
-    /**
-     * {@inheritdoc}
-     */
-    protected function normalizeObject(DataObject $object)
-    {
-        $name = $object->getName();
-        $name = $this->removePathPrefix($name);
-        $mimetype = explode('; ', $object->getContentType());
-
-        return [
-            'type'      => ((in_array('application/directory', $mimetype)) ? 'dir' : 'file'),
-            'dirname'   => Util::dirname($name),
-            'path'      => $name,
-            'timestamp' => strtotime($object->getLastModified()),
-            'mimetype'  => reset($mimetype),
-            'size'      => $object->getContentLength(),
-        ];
-    }
-
-    /**
-     * {@inheritdoc}
-     */
     public function getMetadata($path)
     {
-        $object = $this->getPartialObject($path);
+        $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$path);
 
-        return $this->normalizeObject($object);
+        $headers = ['X-Auth-Token' => $this->TOKEN];
+
+        $response = $this->request('GET',$this->ENDPOINT.'/'.$pathPrefix, $headers);
+
+        $object = $response->getHeaders();
+
+        return $this->normalizeObject($object, $pathPrefix);
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function getSize($path)
     {
         return $this->getMetadata($path);
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function getMimetype($path)
     {
         return $this->getMetadata($path);
     }
 
-    /**
-     * {@inheritdoc}
-     */
     public function getTimestamp($path)
     {
         return $this->getMetadata($path);
     }
 
-    /**
-     * @param string $path
-     *
-     * @return string
-     */
+    public function readStream($path)
+    {
+        return $this->read($path);
+    }
+
+    public function writeStream($path, $resource, Config $config)
+    {
+        return $this->write($path, $resource, $config);
+    }
+
+    public function enableContainer($path)
+    {
+        $headers = [];
+        $headers['X-Auth-Token'] = $this->TOKEN;
+        $headers['X-CDN-Enabled'] = 'True';
+        $headers['X-TTL'] = 604800;
+        $response = $this->request('PUT', $this->CDN_ENDPOINT.'/'.$this->containerName, $headers);
+
+        return $response;
+    }
+
+    public function getPublicUrlCDN($path)
+    {
+        $headers = [];
+        $headers['X-Auth-Token'] = $this->TOKEN;
+        $pathPrefix = $this->applyPathPrefix($path);
+        $response = $this->request('HEAD', $this->CDN_ENDPOINT.'/'.$this->containerName, $headers);
+
+        $cdn_uri = $response->getHeaders()['X-Cdn-Uri'][0];
+
+        return $cdn_uri.'/'.$pathPrefix;
+    }
+
     public function applyPathPrefix($path)
     {
         $encodedPath = join('/', array_map('rawurlencode', explode('/', $path)));
@@ -330,5 +299,57 @@ class RackspaceAdapter extends AbstractAdapter
         return parent::applyPathPrefix($encodedPath);
     }
 
+    protected function request( $method, $url, array $headers = [], $body = null)
+    {
+        try {
+            $client = new Client();
+
+            $options = [];
+
+            if (isset($headers) && !empty($headers)){
+                $options['headers'] = $headers;
+            }
+
+            if (isset($body) && !empty($body)){
+                $options['body'] = $body;
+            }
+
+            return $client->request($method, $url, $options);
+        }catch (\Exception $exception){
+            return json_encode([
+                'message' =>$exception->getMessage()
+            ]);
+        }
+    }
+
+    protected function objectExists($name)
+    {
+        // Send HEAD request to check resource existence
+        $headers = ['X-Auth-Token' => $this->TOKEN];
+        $pathPrefix = $this->applyPathPrefix($this->containerName.'/'.$name);
+        $response = $this->request('GET', $this->ENDPOINT.'/'.$pathPrefix, $headers);
+
+        if (is_object($response)){
+            return true;
+        }else{
+            return false;
+        }
+    }
+
+    protected function normalizeObject($object ,$path)
+    {
+        $name = $path;
+        $name = $this->removePathPrefix($name);
+        $mimetype = explode('; ', $object['Content-Type'][0]);
+
+        return [
+            'type'      => ((in_array('application/directory', $mimetype )) ? 'dir' : 'file'),
+            'dirname'   => Util::dirname($name),
+            'path'      => $path,
+            'timestamp' => strtotime($object['Last-Modified'][0]),
+            'mimetype'  => reset($mimetype),
+            'size'      => $object['Content-Length'][0],
+        ];
+    }
 
 }
